@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import scipy.io as sio
 
 from pymongo import MongoClient
-from SNHunters_analysis import get_date_limits_from_manifest
+#from SNHunters_analysis import get_date_limits_from_manifest
 
 def get_subjects_by_date_limits(db, mjd_limits):
 
@@ -134,13 +134,77 @@ class SWAP(object):
                                 "dt_prime":self.dt_prime}
                   )
 
-        out = open("user_dict_"+filename.strip(".mat")+".pkl","wb")
+        out = open("user_dict_"+filename[:-4]+".pkl","wb")
         pickle.dump(self.user_history,out)
         out.close()
 
-        out = open("subject_dict_"+filename.strip(".mat")+".pkl","wb")
+        out = open("subject_dict_"+filename[:-4]+".pkl","wb")
         pickle.dump(self.subject_history,out)
         out.close()
+
+class MATSWAP(SWAP):
+
+    def __init__(self, dotMatFile, p0=0.01, epsilon=0.5):
+        #self.dotMatFile = dotMatFile
+        self.data = sio.loadmat(dotMatFile)
+        self.subjects = np.squeeze(self.data["subject_id"])
+        self.usernames = np.squeeze(self.data["user_name"])
+        self.annotations = np.squeeze(self.data["annotation"])
+        self.gold_labels = np.squeeze(self.data["gold_label"])
+        self.classifications = np.squeeze(self.data["classification_id"])
+        self.p0 = p0 # prior probability real
+        self.epsilon = epsilon # estimated volunteer performance
+        self.value_to_label = ["No","Yes"]
+        self.gold_updates = True
+        
+        self.M, self.unique_users = self.initialiseM()
+        self.S = self.initialiseS()
+        
+        self.dt = np.zeros(self.M.shape)
+        self.dt_prime = np.zeros(self.M.shape)
+        self.user_history = {}
+        self.subject_history = {}
+
+    def initialiseM(self):
+        unique_users = np.unique(self.data["user_name"])
+        return np.ones((len(unique_users),2))*self.epsilon, unique_users
+
+    def process(self):
+        total = len(self.classifications)
+        print total
+        for i,classification_id in enumerate(self.classifications):
+            subject_id = self.subjects[i]
+            user_index = self.unique_users.tolist().index(self.usernames[i])
+            subject_index = int(np.where(np.array(self.subjects) == subject_id)[0][0])
+            annotation = self.annotations[i]
+            gold, label = self.isGoldStandard(i)
+            if gold and self.gold_updates:
+                self.updateM(user_index, label, annotation)
+            if annotation == 1:
+                self.S[subject_index] = self.S[subject_index]*self.M[user_index][1] / \
+                                        (self.S[subject_index]*self.M[user_index][1] + \
+                                        (1-self.M[user_index][0])*(1-self.S[subject_index]))
+            elif annotation == 0:
+                self.S[subject_index] = self.S[subject_index]*(1-self.M[user_index][1]) / \
+                                        (self.S[subject_index]*(1-self.M[user_index][1]) + \
+                                        (self.M[user_index][0])*(1-self.S[subject_index]))
+            np.ma.fix_invalid(self.S,copy=False,fill_value=self.p0)
+            try:
+                self.subject_history[subject_id].append(self.S[subject_index])
+            except KeyError:
+                self.subject_history[subject_id] = [self.p0, self.S[subject_index]]
+            sys.stdout.write("%.3f%% complete.\r" % (100*float(i)/float(total)))
+            sys.stdout.flush()
+
+    def isGoldStandard(self, i):
+        try:
+            label = self.gold_labels[i]
+            if label == -1:
+                raise ValueError
+        except:
+            return False, None
+        if label is not None:
+            return True, label
 
 class SNAP(SWAP):
     
@@ -380,7 +444,58 @@ def plot_S_surface():
     plt.show()
 
 def main():
-    plot_S_surface()
+    #plot_S_surface()
+    #swap = MATSWAP("../hco-experiments/SNHunters_classification_dump_20170109.mat")
+    #swap.process()
+    #swap.save("matswaptest.mat")
+    data = sio.loadmat("matswaptest.mat")
+    user_dict = pickle.load(open("user_dict_swaptes.pkl","rb"))
+    m = len(data["unique_users"])
+    print m
+    order = np.random.permutation(m)
+    
+    counter = 0
+    max = 0
+    for i in order:
+        #if counter == 100:
+        #    break
+        #u = str(data["unique_users"][i].rstrip())
+        #u = data["unique_users"][i]
+        #print u
+        #print user_dict[u]
+        try:
+            #u = str(data["unique_users"][i].rstrip())
+            u = data["unique_users"][i]
+            #print u
+            #print user_dict[u]
+            if len(user_dict[u][1])+len(user_dict[u][0]) > max:
+                max =  len(user_dict[u][1])+len(user_dict[u][0])
+            #    continue
+            if u[:6] == "robot_":
+                print u, "%.3f %.3f" % (user_dict[u][1][-1], user_dict[u][0][-1])
+                plt.plot(user_dict[u][1][-1],user_dict[u][0][-1], "o", \
+                         color="#FFBA08", alpha=0.5)
+            else:
+                plt.plot(user_dict[u][1][-1],user_dict[u][0][-1], "o", \
+                         ms=(len(user_dict[u][1])+len(user_dict[u][0]))/2000.0,\
+                         color="#3F88C5", alpha=0.5)
+                #plt.plot(user_dict[u][1][-1],user_dict[u][0][-1], "o", \
+                #         color="#3F88C5", alpha=0.5)
+            counter += 1
+        except (KeyError, IndexError):
+            continue
+    print max
+    plt.text(0.03,0.03,"Obtuse")
+    plt.text(0.75,0.03,"Optimistic")
+    plt.text(0.03,0.95,"Pessimistic")
+    plt.text(0.8,0.95,"Astute")
+    plt.plot([0.5,0.5], [0,1],"k--", lw=1)
+    plt.plot([0,1], [0.5,0.5],"k--", lw=1)
+    plt.plot([0,1], [1,0],"k-", lw=1)
+    plt.xlabel("P(\'real\'|real)")
+    plt.ylabel("P(\'bogus\'|bogus)")
+    plt.axes().set_aspect('equal')
+    plt.show()
     exit()
     client = MongoClient()
     db = client.SNHunters
